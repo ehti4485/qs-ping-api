@@ -1,64 +1,30 @@
-
-// ============================================================
-// QuickShare Hub — Ping API (Vercel)
-// File: api/ping.js
-// ============================================================
-// HOW IT WORKS:
-// App starts → sends GET /api/ping?action=start
-// App stops  → sends GET /api/ping?action=stop  
-// Admin      → sends GET /api/ping?action=admin&key=YOUR_KEY
-// ============================================================
+// QuickShare Hub — Ping API (Vercel + Upstash Redis)
+// Uses Upstash REST API directly — no SDK needed
 
 const ADMIN_KEY = process.env.ADMIN_KEY || 'quickshare-admin-2026';
-const KV_REST_API_URL = process.env.KV_REST_API_URL;
-const KV_REST_API_TOKEN = process.env.KV_REST_API_TOKEN;
+const UPSTASH_URL = process.env.KV_REST_API_URL;
+const UPSTASH_TOKEN = process.env.KV_REST_API_TOKEN;
 
-async function kvGet(key) {
-  if (!KV_REST_API_URL) return 0;
+async function redis(command, ...args) {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) {
+    console.error('[Ping] Missing Upstash env vars');
+    return null;
+  }
   try {
-    const r = await fetch(`${KV_REST_API_URL}/get/${key}`, {
-      headers: { Authorization: `Bearer ${KV_REST_API_TOKEN}` }
+    const res = await fetch(`${UPSTASH_URL}/${[command, ...args].join('/')}`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` }
     });
-    const data = await r.json();
-    return data.result ? parseInt(data.result) : 0;
-  } catch { return 0; }
-}
-
-async function kvIncr(key) {
-  if (!KV_REST_API_URL) return 0;
-  try {
-    const r = await fetch(`${KV_REST_API_URL}/incr/${key}`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${KV_REST_API_TOKEN}` }
-    });
-    const data = await r.json();
-    return data.result || 0;
-  } catch { return 0; }
-}
-
-async function kvDecr(key) {
-  if (!KV_REST_API_URL) return 0;
-  try {
-    const r = await fetch(`${KV_REST_API_URL}/decr/${key}`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${KV_REST_API_TOKEN}` }
-    });
-    const data = await r.json();
-    return Math.max(0, data.result || 0);
-  } catch { return 0; }
-}
-
-async function kvSet(key, value) {
-  if (!KV_REST_API_URL) return;
-  try {
-    await fetch(`${KV_REST_API_URL}/set/${key}/${value}`, {
-      headers: { Authorization: `Bearer ${KV_REST_API_TOKEN}` }
-    });
-  } catch {}
+    const data = await res.json();
+    return data.result;
+  } catch (e) {
+    console.error('[Ping] Redis error:', e.message);
+    return null;
+  }
 }
 
 function todayKey() {
-  return `today_${new Date().toISOString().slice(0,10)}`;
+  return `qs_today_${new Date().toISOString().slice(0, 10)}`;
 }
 
 module.exports = async (req, res) => {
@@ -69,15 +35,18 @@ module.exports = async (req, res) => {
   const action = req.query.action;
 
   if (action === 'start') {
-    await kvIncr('qs_active');
-    await kvIncr('qs_alltime');
-    await kvIncr(todayKey());
+    await redis('incr', 'qs_active');
+    await redis('incr', 'qs_alltime');
+    await redis('incr', todayKey());
+    // Today key expire in 48 hours
+    await redis('expire', todayKey(), '172800');
     return res.status(200).json({ ok: true });
   }
 
   if (action === 'stop') {
-    const active = await kvDecr('qs_active');
-    if (active < 0) await kvSet('qs_active', 0);
+    const current = await redis('get', 'qs_active');
+    const val = parseInt(current) || 0;
+    if (val > 0) await redis('decr', 'qs_active');
     return res.status(200).json({ ok: true });
   }
 
@@ -85,10 +54,19 @@ module.exports = async (req, res) => {
     if (req.query.key !== ADMIN_KEY) {
       return res.status(401).json({ error: 'Wrong key' });
     }
-    const active  = await kvGet('qs_active');
-    const alltime = await kvGet('qs_alltime');
-    const today   = await kvGet(todayKey());
+    const active  = parseInt(await redis('get', 'qs_active'))       || 0;
+    const alltime = parseInt(await redis('get', 'qs_alltime'))      || 0;
+    const today   = parseInt(await redis('get', todayKey()))        || 0;
     return res.status(200).json({ active, today, alltime });
+  }
+
+  // Debug: check env vars are present (without exposing values)
+  if (action === 'debug') {
+    return res.status(200).json({
+      has_url:   !!UPSTASH_URL,
+      has_token: !!UPSTASH_TOKEN,
+      url_prefix: UPSTASH_URL ? UPSTASH_URL.slice(0, 30) + '...' : 'MISSING'
+    });
   }
 
   return res.status(400).json({ error: 'Invalid action' });
