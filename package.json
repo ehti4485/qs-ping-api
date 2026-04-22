@@ -1,0 +1,6 @@
+{
+  "name": "quickshare-ping",
+  "version": "1.0.0",
+  "description": "QuickShare Hub — Anonymous usage ping API",
+  "main": "api/ping.js"
+}
